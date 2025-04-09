@@ -1,0 +1,9 @@
+# k8s-manifest/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: number-guessing-game-config
+  namespace: webapps
+data:
+  SPRING_PROFILES_ACTIVE: "prod"
+  JAVA_OPTS: "-Xmx512m -Xms256m"

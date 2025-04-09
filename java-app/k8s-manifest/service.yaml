@@ -1,0 +1,13 @@
+# k8s-manifest/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: number-guessing-game-service
+  namespace: webapps
+spec:
+  selector:
+    app: number-guessing-game
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: LoadBalancer
