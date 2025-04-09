@@ -1,7 +1,0 @@
-com/example/game/model/Game$GuessResult.class
-com/example/game/GameApplication.class
-com/example/game/controller/GameController.class
-com/example/game/service/GameService.class
-com/example/game/controller/WebController.class
-com/example/game/model/Game.class
-com/example/game/model/Game$Guess.class
