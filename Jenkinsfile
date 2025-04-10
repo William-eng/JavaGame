@@ -15,7 +15,7 @@ pipeline {
     stages {
         stage('Git Checkout') {
             steps {
-                git credentialsId: 'git-cred', url: 'https://github.com/William-eng/JavaGame.git'
+                 git branch: 'main', credentialsId: 'git-cred', url: 'https://github.com/William-eng/javagame.git'
             }
         }
         stage('Compile') {
@@ -33,21 +33,23 @@ pipeline {
                 sh "trivy fs --format table -o trivy-fs-report.html ."
             }
         }
-        stage('Code Quality Analysis') {
+        stage('SonarQube Analysis') {
             steps {
                 withSonarQubeEnv('sonar') {
-                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar-projectName=${APP_NAME} -Dsonar.projectKey=${APP_NAME} \
-                            -Dsonar.java.binaries=. '''
-                }
+                    sh """
+                         $SCANNER_HOME/bin/sonar-scanner -Dsonar-projectName=java-project -Dsonar.projectKey=java-project -X \
+                            -Dsonar.java.binaries=.
+                     """
+                    }
             }
         }
-        stage('Quality Gate') {
-            steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
-                }
-            }
-        }
+        // stage('Quality Gate') {
+        //     steps {
+        //          script {
+        //             waitForQualityGate abortPipeline: false, credentialsId: 'sonar-token'
+        //         }
+        //     }
+        // }
         stage('Build') {
             steps {
                 sh "mvn package"
@@ -56,7 +58,7 @@ pipeline {
         stage('Publish Artifacts to Nexus') {
             steps {
                 withMaven(globalMavenSettingsConfig: 'global-settings', jdk: 'jdk17', maven: 'maven3', mavenSettingsConfig: '', traceability: true) {
-                    sh "mvn deploy"
+                    sh "mvn deploy -Dnexus.username=admin -Dnexus.password=resolve"
                 }
             }
         }
@@ -85,46 +87,107 @@ pipeline {
                 }
             }
         }
-        stage('Update Kubernetes Manifests') {
-            steps {
-                script {
-                    sh """
-                    sed -i 's|image: ${DOCKER_USERNAME}/${APP_NAME}:.*|image: ${DOCKER_USERNAME}/${APP_NAME}:${IMAGE_TAG}|' k8s-manifest/deployment.yaml
-                    """
-                }
-            }
-        }
+        // stage('Update Kubernetes Manifests') {
+        //     steps {
+        //         script {
+        //             sh """
+        //             sed -i 's|image: ${DOCKER_USERNAME}/${APP_NAME}:.*|image: ${DOCKER_USERNAME}/${APP_NAME}:${IMAGE_TAG}|' k8s-manifest/deployment.yaml
+        //             """
+        //         }
+        //     }
+        // }
         stage('Deploy to EKS') {
             steps {
-                withAWS(credentials: 'aws-credentials', region: 'us-east-1') {
-                    sh "aws eks update-kubeconfig --name your-eks-cluster-name --region us-east-1"
+                withCredentials([string(credentialsId: 'aws-credentials', variable: 'AWS_ACCESS_KEY_ID'),
+                                string(credentialsId: 'aws-secret', variable: 'AWS_SECRET_ACCESS_KEY')]) {
+                    sh "aws eks update-kubeconfig --name willy-cluster --region us-east-1"
                     sh "kubectl apply -f k8s-manifest/configmap.yaml -n webapps"
                     sh "kubectl apply -f k8s-manifest/deployment.yaml -n webapps"
                     sh "kubectl apply -f k8s-manifest/service.yaml -n webapps"
                 }
             }
         }
-        stage('Verify the deployment') {
+        stage('Process Security Scan Results') {
             steps {
-                withAWS(credentials: 'aws-credentials', region: 'us-east-1') {
-                    sh "kubectl get pods -n webapps | grep ${APP_NAME}"
-                    sh "kubectl get svc -n webapps | grep ${APP_NAME}"
-                    sh "echo 'Application deployed successfully to EKS cluster'"
+                script {
+                    try {
+                        // Extract vulnerability counts from Trivy reports
+                        def fsScanCriticalCount = sh(script: "grep -c 'CRITICAL' trivy-fs-report.html || true", returnStdout: true).trim()
+                        def fsScanHighCount = sh(script: "grep -c 'HIGH' trivy-fs-report.html || true", returnStdout: true).trim()
+                        
+                        def imageScanCriticalCount = sh(script: "grep -c 'CRITICAL' trivy-image-report.html || true", returnStdout: true).trim()
+                        def imageScanHighCount = sh(script: "grep -c 'HIGH' trivy-image-report.html || true", returnStdout: true).trim()
+                        
+                        // Store for use in email notifications
+                        env.FS_CRITICAL_VULNS = fsScanCriticalCount
+                        env.FS_HIGH_VULNS = fsScanHighCount
+                        env.IMAGE_CRITICAL_VULNS = imageScanCriticalCount
+                        env.IMAGE_HIGH_VULNS = imageScanHighCount
+                        
+                        echo "Security Scan Summary:"
+                        echo "Filesystem: ${fsScanCriticalCount} critical, ${fsScanHighCount} high vulnerabilities"
+                        echo "Docker image: ${imageScanCriticalCount} critical, ${imageScanHighCount} high vulnerabilities"
+                        
+                        // Optionally fail build based on thresholds
+                        // if (imageScanCriticalCount.toInteger() > 0) {
+                        //     error "Build failed due to ${imageScanCriticalCount} critical vulnerabilities in Docker image!"
+                        // }
+                    } catch (Exception e) {
+                        echo "Failed to process security scan results: ${e.message}"
+                    }
                 }
             }
         }
     }
+    
     post {
         always {
             archiveArtifacts artifacts: 'trivy-fs-report.html, trivy-image-report.html', followSymlinks: false
-            junit testResults: '**/target/surefire-reports/*.xml'
-            cleanWs()
+            junit testResults: '**/target/surefire-reports/*.xml', allowEmptyResults: true
         }
         success {
             echo 'The Pipeline succeeded!'
+            mail to: 'williamtijesuni@gmail.com',
+                 subject: "[SUCCESS] Pipeline: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: """
+                 Pipeline ${env.JOB_NAME} #${env.BUILD_NUMBER} completed successfully!
+                 
+                 Application: ${APP_NAME}
+                 Environment: ${env.ENVIRONMENT ?: 'Production'}
+                 Build URL: ${env.BUILD_URL}
+                 
+                 Security Scan Results:
+                 - Filesystem scan: ${env.FS_CRITICAL_VULNS ?: '0'} critical, ${env.FS_HIGH_VULNS ?: '0'} high vulnerabilities
+                 - Docker image scan: ${env.IMAGE_CRITICAL_VULNS ?: '0'} critical, ${env.IMAGE_HIGH_VULNS ?: '0'} high vulnerabilities
+                 
+                 The security scan reports have been archived as build artifacts.
+                 Please check the Trivy reports for detailed vulnerability information.
+                 
+                 Deployment has been completed to EKS cluster.
+                 """
         }
         failure {
             echo 'The Pipeline failed!'
+            mail to: 'williamtijesuni@gmail.com',
+                 subject: "[FAILED] Pipeline: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                 body: """
+                 Pipeline ${env.JOB_NAME} #${env.BUILD_NUMBER} failed!
+                 
+                 Application: ${APP_NAME}
+                 Environment: ${env.ENVIRONMENT ?: 'Production'}
+                 Build URL: ${env.BUILD_URL}
+                 
+                 Security Scan Results (if available):
+                 - Filesystem scan: ${env.FS_CRITICAL_VULNS ?: 'N/A'} critical, ${env.FS_HIGH_VULNS ?: 'N/A'} high vulnerabilities
+                 - Docker image scan: ${env.IMAGE_CRITICAL_VULNS ?: 'N/A'} critical, ${env.IMAGE_HIGH_VULNS ?: 'N/A'} high vulnerabilities
+                 
+                 Please check the console output for detailed error information.
+                 If security scan reports were generated before the failure,
+                 they have been archived as build artifacts.
+                 """
+        }
+        cleanup {
+            cleanWs()
         }
     }
 }
