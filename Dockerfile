@@ -1,12 +1,15 @@
 FROM eclipse-temurin:17-jdk as build
 WORKDIR /workspace/app
 
-COPY mvnw .
-COPY .mvn .mvn
+# Install Maven directly instead of using wrapper
+RUN apt-get update && apt-get install -y maven
+
+# Copy pom.xml and source code
 COPY pom.xml .
 COPY src src
 
-RUN ./mvnw package -DskipTests
+# Build the application using installed Maven
+RUN mvn package -DskipTests
 
 FROM eclipse-temurin:17-jre
 VOLUME /tmp
